@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Optional
 
 import openai
@@ -52,16 +53,10 @@ class LLMBackend:
 
 def _extract_json(text: str) -> str:
     """Extract JSON from markdown code blocks or return as-is."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if lines[0].startswith("```json"):
-            lines = lines[1:]
-        elif lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines[-1] == "```":
-            lines = lines[:-1]
-        return "\n".join(lines)
+    # Find JSON inside ```json ... ``` or ``` ... ``` anywhere in text
+    match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
     return text
 
 

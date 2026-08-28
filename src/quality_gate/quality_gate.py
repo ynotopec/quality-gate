@@ -51,50 +51,95 @@ class QualityReport:
         }
 
 
+# Pre-compiled regex patterns for citation detection
+_CITATION_RE = re.compile(r'\[\d+\]')
+_AUG_RE = re.compile(r'\([A-Z][a-z]+,\s*\d{4}\)')
+
+
 def count_citations(text: str) -> int:
-    """Count citations in text."""
-    bracketed = len(re.findall(r'\[\d+\]', text))
-    author_year = len(re.findall(r'\([A-Z][a-z]+,\s*\d{4}\)', text))
+    """Count citations in text: [1], (Smith, 2024)."""
+    bracketed = len(_CITATION_RE.findall(text))
+    author_year = len(_AUG_RE.findall(text))
     return max(bracketed, author_year)
+
+
+# Patterns for internal contradiction detection
+_CONTRA_PAT_A_FR = re.compile(
+    r"(\w+)\s+est\s+(?:pas\s+)?(?:un|une|de\s+la)\s+(\w+)",
+    re.IGNORECASE,
+)
+_CONTRA_PAT_A_EN = re.compile(
+    r"(\w+)\s+is\s+(?:not\s+)?(?:a|an|the)\s+(\w+)",
+    re.IGNORECASE,
+)
+# Match: "X n'est pas Y", "X n'est plus Y" or "X is not Y"
+_CONTRA_PAT_B_FR = re.compile(
+    r"(?:n[']?est(?:\s+pas)?|(?:n|ne)\s+est\s+pas|n?\s+pas|n?\s+plus|n?\s+jamais)",
+)
+_CONTRA_PAT_B_EN = re.compile(
+    r"(?:is\s+not|isn['\u2019]|is\s+no\s+longer|is\s+never)",
+    re.IGNORECASE,
+)
 
 
 def check_internal_consistency(text: str) -> dict:
     """Check for internal contradictions."""
     contradictions = []
-    # Pattern: "X est Y" AND "X n'est pas Y" / "X n'est plus Y" etc.
-    pat_a = r"(?:le\s+\S+)\s+est\s+(?:pas\s+)?(?:un|une|de\s+la)\s+(\S+)"
-    pat_b = r"(?:le\s+\S+)\s+n(?:est|pas|plus|jamais)\s+(?:un|une|de\s+la)"
-    if re.search(pat_a, text) and re.search(pat_b, text):
-        contradictions.append("contradictory_statements")
+
+    # Try both French and English "X is Y" patterns
+    for pat_a, pat_b in [
+        (_CONTRA_PAT_A_FR, _CONTRA_PAT_B_FR),
+        (_CONTRA_PAT_A_EN, _CONTRA_PAT_B_EN),
+    ]:
+        statements_a = set()
+        for m in pat_a.finditer(text):
+            subject = m.group(1).lower()
+            predicate = m.group(2).lower().rstrip(".,!?;:")
+            if len(subject) > 2 and len(predicate) > 1:
+                statements_a.add((subject, predicate))
+
+        for subject, predicate in statements_a:
+            idx = text.lower().find(subject)
+            if idx == -1:
+                continue
+            rest = text[idx + len(subject):]
+            if pat_b.search(rest[:200]):
+                contradictions.append("contradictory_statements")
+                break
+
+        if contradictions:
+            break
+
     return {
         "contradictions_found": len(contradictions),
         "details": contradictions,
     }
 
 
-# Pre-compiled regex patterns for hallucination signals
-_HALLUC_SIGNALS = {
+# Pre-compiled hallucination signal patterns
+_HALLUC_PATTERNS = {
     "fake_citations": re.compile(
-        r"(?:Ref|Source|R[eé]f[eé]rence|Citation)\s+\d+:\s+\S+\s+—\s+\S+",
+        r"(?:Ref(?:\.|ence)?|Source|R(?:é|e)f(?:é|e)rence|Citation)"
+        r"\s+\d+[.:]\s+\S+\s+\S+\s+—\s+\S+",
+        re.IGNORECASE,
     ),
     "uncertain_markers": re.compile(
-        r"(?:probablement|peut-être|apparemment|selon certaines sources|il semble)",
+        r"(?:probablement|peut-?tre|apparemment|selon certaines sources|il semble)",
         re.IGNORECASE,
     ),
     "overconfident_facts": re.compile(
-        r"(?:c'est prouvé|c'est certain|la vérité c'est que|"
+        r"(?:c[']?est prouv[ée]|c[']?est certain|la v[éè]rit[éè] c[']?est que|"
         r"absolument impossible|tous les experts)",
         re.IGNORECASE,
     ),
     "made_up_names": re.compile(
-        r"(?:Dr|Prof|Mme|M.)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?:a|ont|est)",
+        r"(?:Dr|Prof|Mme|M[.]|[Mm]onsieur|[Mm]adame)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?:a|ont|est)",
     ),
     "timestamp_anomalies": re.compile(
         r"(?:en\s+\d{4}|depuis\s+\d{4}|dans\s+\d+\s+ans)",
     ),
     "unclear_sources": re.compile(
-        r"(?:d'après|selon une(?:source)?(?:non )?vérifiée|"
-        r"sources multiples|divers rapports)",
+        r"(?:d['ap]{2}s[ée]|selon une(?:source)?(?:non )?v[éè]rifi[ée]|sources multiples|divers rapports)",
         re.IGNORECASE,
     ),
 }
@@ -103,11 +148,9 @@ _HALLUC_SIGNALS = {
 def heuristic_hallucination_signals(text: str) -> dict:
     """Quick hallucination detection without external calls."""
     signals = {}
-    for name, pattern in _HALLUC_SIGNALS.items():
+    for name, pattern in _HALLUC_PATTERNS.items():
         signals[name] = len(pattern.findall(text))
-
-    consistency = check_internal_consistency(text)
-    signals["internal_consistency"] = consistency
+    signals["internal_consistency"] = check_internal_consistency(text)
     return signals
 
 
@@ -120,7 +163,7 @@ def extract_claims_for_verification(text: str, prompt: str) -> list[dict]:
         r'\d+[\.,]?\d*\s*(%|milliards|millions|euros|USD|dollars)'
     )
     name_re = re.compile(
-        r'(?:Dr|Prof|Mme|M.)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+'
+        r'(?:Dr|Prof|Mme|M[.]|[Mm]onsieur|[Mm]adame)\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+'
     )
     date_re = re.compile(
         r"(?:en|depuis|dans|au cours de)\s+(?:janvier|février|mars|"
@@ -133,19 +176,12 @@ def extract_claims_for_verification(text: str, prompt: str) -> list[dict]:
         sentence = sentence.strip()
         if not sentence:
             continue
-        has_number = bool(number_re.search(sentence))
-        has_name = bool(name_re.search(sentence))
-        has_date = bool(date_re.search(sentence))
-
-        if has_number or has_name or has_date:
-            claims.append({
-                "claim": sentence[:200],
-                "type": "factual",
-                "confidence": "medium",
-                "has_number": has_number,
-                "has_name": has_name,
-                "has_date": has_date,
-            })
+        if number_re.search(sentence):
+            claims.append({"claim": sentence[:200], "type": "factual", "confidence": "medium", "has_number": True, "has_name": False, "has_date": False})
+        elif name_re.search(sentence):
+            claims.append({"claim": sentence[:200], "type": "factual", "confidence": "medium", "has_number": False, "has_name": True, "has_date": False})
+        elif date_re.search(sentence):
+            claims.append({"claim": sentence[:200], "type": "factual", "confidence": "medium", "has_number": False, "has_name": False, "has_date": True})
 
     return claims
 
@@ -228,7 +264,10 @@ class QualityGate:
         self_score = self._self_score(text, prompt)
         details["self_score"] = self_score
         if self_score < self.self_score_threshold:
-            issues.append(QualityIssue.SELF_SCORE_LOW)
+            if self_score <= 3.0:
+                issues.append(QualityIssue.STRUCTURE_BROKEN)  # Very low → FAIL
+            else:
+                issues.append(QualityIssue.SELF_SCORE_LOW)  # Below threshold → WARNING
 
         # 2. Hallucination detection
         hallucination_rate = 0.0
@@ -242,6 +281,11 @@ class QualityGate:
             elif hallucination_rate > self.warning_hallucination_threshold:
                 issues.append(QualityIssue.HALLUCINATION)
 
+            # Direct fake citation detection (independent of claim-based rate)
+            signals = details.get("hallucination_signals", {})
+            if signals.get("fake_citations", 0) > 0:
+                issues.append(QualityIssue.HALLUCINATION)
+
         # 3. Citation check
         citation_count = count_citations(text)
         details["citation_count"] = citation_count
@@ -252,7 +296,12 @@ class QualityGate:
                 issues.append(QualityIssue.MISSING_CITATIONS)
 
         # 4. Determine level
-        if len(issues) == 0:
+        # STRUCTURE_BROKEN always forces FAIL (very poor quality)
+        has_structure_broken = QualityIssue.STRUCTURE_BROKEN in issues
+        if has_structure_broken:
+            level = QualityLevel.FAIL
+            recommendation = "fallback"
+        elif len(issues) == 0:
             level = QualityLevel.OK
             recommendation = "proceed"
         elif len(issues) == 1:
@@ -325,13 +374,14 @@ class QualityGate:
             "le", "la", "les", "des", "de", "du", "un", "une", "et", "est",
             "dans", "pour", "avec", "sur", "ce", "ceux", "nous", "vous",
             "ils", "elles", "font", "sont", "faire", "dire", "voir",
-            "pouvoir", "devoir", "falloir",
+            "pouvoir", "devoir", "falloir", "reponse", "structuree",
+            "bien", "source", "chat", "animal",
         }
         english_words = {
             "the", "a", "an", "is", "are", "was", "were", "in", "for",
             "with", "on", "this", "these", "we", "you", "they", "have",
             "has", "do", "does", "make", "say", "see", "can", "could",
-            "would", "should",
+            "would", "should", "response", "structured", "well", "source",
         }
 
         words = set(text.lower().split())
@@ -404,29 +454,13 @@ class QualityGate:
 
 
 class QualityGatePipeline:
-    """Pipeline that wraps an LLM call with quality gate + fallback.
+    """Pipeline that wraps an LLM call with quality gate + fallback."""
 
-    Usage:
-        gate = QualityGatePipeline(model="gpt-4o", api_key="...")
-        result = gate.call("Explain quantum computing", max_retries=2)
-    """
-
-    def __init__(
-        self,
-        backend,
-        config=None,
-    ):
-        """Initialize pipeline."""
+    def __init__(self, backend, config=None):
         self.backend = backend
         self.gate = QualityGate(config=config)
 
-    def call(
-        self,
-        prompt: str,
-        system: str = "",
-        max_retries: Optional[int] = None,
-        check_hallucination: bool = True,
-    ) -> dict:
+    def call(self, prompt, system="", max_retries=None, check_hallucination=True):
         """Execute LLM call with quality gate + automatic fallback."""
         max_retries = max_retries or self.gate.max_retries
         fallback_used = False
