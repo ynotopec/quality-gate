@@ -1,0 +1,34 @@
+[project]
+name = "quality-gate"
+version = "0.1.0"
+description = "Auto quality control for AI outputs — hallucination detection, self-scoring, and rollback on quality failure"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Nous Research", email = "contact@nousresearch.com"}
+]
+dependencies = [
+    "openai>=1.0.0",
+    "pydantic>=2.0",
+    "pydantic-ai>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6.0",
+    "mypy>=1.10",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
